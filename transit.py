@@ -391,15 +391,8 @@ def compute_separations(sat, target, earth, observer, times):
     perp = sat_pos - los_unit * proj
     sep_km = np.linalg.norm(perp, axis=0)
 
-    obs_ssb = earth + observer
-    target_vec = np.array(
-        obs_ssb.at(times).observe(target).apparent().position.km,
-        dtype=float, copy=True,
-    )
     sat_dir = sat_pos / np.where(slant_range == 0.0, 1.0, slant_range)
-    target_norm = np.linalg.norm(target_vec, axis=0)
-    target_dir = target_vec / np.where(target_norm == 0.0, 1.0, target_norm)
-    sep_deg = angular_separation(sat_dir, target_dir)
+    sep_deg = angular_separation(sat_dir, los_unit)
     return sep_km, slant_range, proj, target_range, sep_deg
 
 
@@ -603,18 +596,16 @@ def cluster_candidates(candidates, cluster_gap_s):
 def refine_transit(sat, target, earth, observer, t_rough, window_s=2.0):
     ts = load.timescale()
 
-    def sep_at(offset_s):
-        t = ts.from_datetimes([
-            t_rough.utc_datetime() + timedelta(seconds=float(offset_s))
-        ])
-        sep_km, _, _, _, sep_deg = compute_separations(
-            sat, target, earth, observer, t
-        )
-        return float(sep_km[0]), float(sep_deg[0])
-
     coarse = np.linspace(-window_s, window_s, 21)
-    vals = [sep_at(o)[1] for o in coarse]
-    best = int(np.argmin(vals))
+    rough_dt = t_rough.utc_datetime()
+    coarse_times = ts.from_datetimes([
+        rough_dt + timedelta(seconds=float(offset))
+        for offset in coarse
+    ])
+    coarse_sep_deg = compute_separations(
+        sat, target, earth, observer, coarse_times
+    )[4]
+    best = int(np.argmin(coarse_sep_deg))
     lo = coarse[max(0, best - 1)]
     hi = coarse[min(len(coarse) - 1, best + 1)]
 
@@ -622,15 +613,26 @@ def refine_transit(sat, target, earth, observer, t_rough, window_s=2.0):
     for _ in range(20):
         c = hi - phi * (hi - lo)
         d = lo + phi * (hi - lo)
-        if sep_at(c)[1] < sep_at(d)[1]:
+        pair_times = ts.from_datetimes([
+            rough_dt + timedelta(seconds=float(c)),
+            rough_dt + timedelta(seconds=float(d)),
+        ])
+        pair_sep_deg = compute_separations(
+            sat, target, earth, observer, pair_times
+        )[4]
+        if pair_sep_deg[0] < pair_sep_deg[1]:
             hi = d
         else:
             lo = c
     t_opt_s = 0.5 * (lo + hi)
 
-    t_opt_dt = t_rough.utc_datetime() + timedelta(seconds=float(t_opt_s))
+    t_opt_dt = rough_dt + timedelta(seconds=float(t_opt_s))
     t_opt = ts.from_datetime(t_opt_dt)
-    sep_km_opt, sep_deg_opt = sep_at(t_opt_s)
+    opt_times = ts.from_datetimes([t_opt_dt])
+    sep_km, _, _, _, sep_deg = compute_separations(
+        sat, target, earth, observer, opt_times
+    )
+    sep_km_opt, sep_deg_opt = float(sep_km[0]), float(sep_deg[0])
     return t_opt, sep_km_opt, sep_deg_opt
 
 
@@ -674,7 +676,8 @@ def _observer_grid_around(lat0, lon0, radius_km, n):
 
 def compute_corridor_grid(sat, target, earth, t_event,
                           lat0, lon0, radius_km,
-                          target_name="", sat_name=None, n=201):
+                          target_name="", sat_name=None, n=201,
+                          sample_radius_km=None):
     """
     Compute sep_km on a grid of observer positions around (lat0, lon0)
     at the event instant.  Fractional seconds are preserved so the
@@ -682,7 +685,9 @@ def compute_corridor_grid(sat, target, earth, t_event,
     """
     ts = load.timescale()
 
-    lats, lons = _observer_grid_around(lat0, lon0, radius_km, n=n)
+    sample_radius = (radius_km if sample_radius_km is None
+                     else min(radius_km, sample_radius_km))
+    lats, lons = _observer_grid_around(lat0, lon0, sample_radius, n=n)
     N = lats.size
     t_event_dt = t_event.utc_datetime()
 
@@ -742,6 +747,7 @@ def compute_corridor_grid(sat, target, earth, t_event,
         "sep_km": sep_km,
         "corridor_km": corridor_km,
         "grid_shape": (n, n),
+        "extent_radius_km": radius_km,
         "sub_lat": sub_lat,
         "sub_lon": sub_lon,
         "slant_range_km": slant_ref,
@@ -834,8 +840,15 @@ def _make_corridor_band(grid, corridor_km, obs_lat, obs_lon,
     lat1_deg = float(LAT[-1, 0])
     lon0_deg = float(LON[0, 0])
     lon1_deg = float(LON[0, -1])
-    half_lat = abs(lat1_deg - lat0_deg) / 2.0
-    half_lon = abs(lon1_deg - lon0_deg) / 2.0
+    extent_radius_km = grid.get("extent_radius_km")
+    if extent_radius_km is None:
+        half_lat = abs(lat1_deg - lat0_deg) / 2.0
+        half_lon = abs(lon1_deg - lon0_deg) / 2.0
+    else:
+        half_lat = extent_radius_km / 111.32
+        half_lon = extent_radius_km / (
+            111.32 * max(np.cos(np.radians(obs_lat)), 1e-6)
+        )
     u_mag = float(np.hypot(u_lat, u_lon))
     if u_mag < 1e-12:
         t_extent = 3.0 * float(np.hypot(half_lat, half_lon))
@@ -1012,7 +1025,7 @@ def generate_transit_map(event, lat, lon, max_dist_km,
              f"{stamp}_{status}_{_safe_name(tile_layer)}_{site}.html")
     out_html = os.path.join(out_dir, fname)
 
-    corridor_km = None
+    corridor_km = event.get("corridor_km")
     has_corridor = False
 
     # The classifier's separation from the observer's LOS to the
@@ -1020,33 +1033,21 @@ def generate_transit_map(event, lat, lon, max_dist_km,
     # as the corridor offset.
     obs_sep_km = float(event.get("sep_km", 0.0))
 
-    # ---------- Pass 1: get the physical corridor width ----------
-    if eph_earth is not None and sat is not None and target is not None:
-        try:
-            find_radius_km = max(max_dist_km * 1.5, 10.0)
-            find_grid = compute_corridor_grid(
-                sat, target, eph_earth, event["time"],
-                lat, lon, find_radius_km,
-                target_name=event["target"],
-                sat_name=event["sat"], n=101,
-            )
-            corridor_km = find_grid["corridor_km"]
-        except Exception as e:
-            print(f"      wide grid failed: {e}", flush=True)
+    if corridor_km is None:
+        corridor_km = disk_corridor_km(
+            event["target"], event["sat_alt_km"], sat_name=event["sat"]
+        )
 
     # ---------- Choose view size so both observer and corridor fit ----------
-    if corridor_km is not None and corridor_km > 0:
+    if corridor_km > 0:
         view_km = max(obs_sep_km, corridor_km * 20.0)
         tight_radius_km = min(max(view_km * 1.5, 0.5), max_dist_km)
     else:
         tight_radius_km = min(max(obs_sep_km * 1.5, 2.0), max_dist_km)
 
-    if corridor_km is not None and corridor_km > 0:
-        target_cell_km = max(corridor_km / 10.0, 0.005)
-    else:
-        target_cell_km = 0.025
-    n = int(np.ceil(2.0 * tight_radius_km / target_cell_km)) + 1
-    n = max(81, min(n, 601))
+    sample_radius_km = min(
+        tight_radius_km, max(corridor_km, 0.05)
+    )
 
     # Map is ALWAYS centered on the observer
     m = folium.Map(
@@ -1057,20 +1058,22 @@ def generate_transit_map(event, lat, lon, max_dist_km,
         control_scale=True,
     )
 
-    # ---------- Pass 2: tight grid centered on the observer ----------
+    # Sample locally for the corridor direction, but extend the drawn lines
+    # across the full map view.
     if eph_earth is not None and sat is not None and target is not None \
-            and corridor_km is not None:
+            and corridor_km > 0:
         try:
             grid = compute_corridor_grid(
                 sat, target, eph_earth, event["time"],
                 lat, lon, tight_radius_km,
                 target_name=event["target"],
-                sat_name=event["sat"], n=n,
+                sat_name=event["sat"], n=5,
+                sample_radius_km=sample_radius_km,
             )
             corridor_km = grid["corridor_km"]
 
             print(f"      tight grid: r={tight_radius_km:.3f} km "
-                  f"n={n}  physical ±{_fmt_km(corridor_km)}  "
+                  f"n=5 local  physical ±{_fmt_km(corridor_km)}  "
                   f"obs_sep={_fmt_km(obs_sep_km)}",
                   flush=True)
 

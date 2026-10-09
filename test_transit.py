@@ -106,15 +106,25 @@ def test_batched_coordinate_first_vectors_can_be_transposed():
     )
 
 
-def test_refinement_evaluates_geometry_with_one_element_time_array(monkeypatch):
+def test_refinement_batches_geometry_evaluations(monkeypatch):
     ts = transit.load.timescale()
     t_rough = ts.utc(2026, 10, 9, 2, 55, 42.375)
     t_rough_dt = t_rough.utc_datetime()
+    batch_sizes = []
 
     def compute_separations(sat, target, earth, observer, times):
-        assert times.shape == (1,)
-        offset = (times.utc_datetime()[0] - t_rough_dt).total_seconds()
-        return np.array([1.0 + offset**2]), None, None, None, np.array([offset**2])
+        batch_sizes.append(times.shape[0])
+        offsets = np.array([
+            (sample - t_rough_dt).total_seconds()
+            for sample in np.atleast_1d(times.utc_datetime())
+        ])
+        return (
+            1.0 + offsets**2,
+            None,
+            None,
+            None,
+            offsets**2,
+        )
 
     monkeypatch.setattr(transit, "compute_separations", compute_separations)
 
@@ -123,6 +133,7 @@ def test_refinement_evaluates_geometry_with_one_element_time_array(monkeypatch):
     assert abs((t_ref.utc_datetime() - t_rough_dt).total_seconds()) < 0.001
     assert np.isclose(sep_km, 1.0, atol=1e-6)
     assert sep_deg < 1e-6
+    assert batch_sizes == [21, *([2] * 20), 1]
 
 
 def test_corridor_band_preserves_physical_width_at_mid_latitude():
@@ -142,6 +153,7 @@ def test_corridor_band_preserves_physical_width_at_mid_latitude():
         "lats": lat_grid.ravel(),
         "lons": lon_grid.ravel(),
         "sep_km": sep_grid.ravel(),
+        "extent_radius_km": 5.0,
     }
     corridor_km = 0.05
 
@@ -192,18 +204,24 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
         "sep_km": 1.0,
         "sep_deg": 0.01,
         "sat_alt_km": 1000.0,
+        "corridor_km": 0.1,
         "status": "NEAR",
     }
     nearest = (39.25, 9.27)
+    grid_calls = []
+
+    def fake_corridor_grid(*args, **kwargs):
+        grid_calls.append((args, kwargs))
+        return {
+            "corridor_km": 0.1,
+            "sub_lat": 39.3,
+            "sub_lon": 9.3,
+        }
 
     monkeypatch.setattr(
         transit,
         "compute_corridor_grid",
-        lambda *args, **kwargs: {
-            "corridor_km": 0.1,
-            "sub_lat": 39.3,
-            "sub_lon": 9.3,
-        },
+        fake_corridor_grid,
     )
     monkeypatch.setattr(
         transit,
@@ -224,6 +242,9 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
     html = tmp_path.joinpath(path.split("/")[-1]).read_text()
     assert "Jupiter transit (" in html
     assert f" at {event_time} UTC" in html
+    assert len(grid_calls) == 1
+    assert grid_calls[0][1]["n"] == 5
+    assert grid_calls[0][1]["sample_radius_km"] == 0.1
 
 
 def test_transit_maps_from_different_sites_do_not_overwrite(tmp_path):
