@@ -12,6 +12,7 @@ corridor around the observer.
 - Observer-specific event classification and physical corridor widths.
 - Interactive Folium maps with the observer, corridor, nearest point on its
   centerline, and satellite subpoint.
+- Event tags for daylight at the observer and satellites in Earth's shadow.
 - Configurable observer, search window, targets, TLE source, and map tiles.
 - Solar System targets: Moon, Sun, Venus, Mars, Jupiter, Saturn, Uranus, and
   Neptune.

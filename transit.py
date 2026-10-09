@@ -55,6 +55,7 @@ Config file (config.ini):
 
 import configparser
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -74,6 +75,8 @@ ANSI_GREY  = "\033[90m"
 
 
 def colored_status(status):
+    if not sys.stdout.isatty():
+        return status
     if status == "CONFIRMED":
         return f"{ANSI_GREEN}{status}{ANSI_RESET}"
     if status == "NEAR":
@@ -81,6 +84,19 @@ def colored_status(status):
     if status == "REJECT":
         return f"{ANSI_GREY}{status}{ANSI_RESET}"
     return status
+
+
+def event_condition_tags(event):
+    tags = []
+    if event.get("daylight"):
+        tags.append("DAYLIGHT")
+    if event.get("satellite_sunlit") is False:
+        tags.append("SATELLITE UNLIT")
+    return tags
+
+
+def format_event_condition_tags(event):
+    return "".join(f" [{tag}]" for tag in event_condition_tags(event))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -397,12 +413,20 @@ def compute_separations(sat, target, earth, observer, times):
 
 
 def horizon_mask(sat, target, earth, observer, times, min_alt_deg):
+    return (target_horizon_mask(target, earth, observer, times, min_alt_deg)
+            & satellite_horizon_mask(sat, observer, times))
+
+
+def target_horizon_mask(target, earth, observer, times, min_alt_deg):
     observer_ssb = earth + observer
     tgt_alt, _, _ = (observer_ssb.at(times)
                      .observe(target).apparent().altaz())
+    return tgt_alt.degrees >= min_alt_deg
+
+
+def satellite_horizon_mask(sat, observer, times):
     sat_alt_ao, _, _ = (sat - observer).at(times).altaz()
-    return ((tgt_alt.degrees >= min_alt_deg)
-            & (sat_alt_ao.degrees >= 0.0))
+    return sat_alt_ao.degrees >= 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -442,13 +466,24 @@ def build_coarse_grid(t_start, t_end, step_s):
     return times, n_steps
 
 
-def cache_target_los(targets, earth, observer, times):
+def cache_target_los(targets, earth, observer, times, min_alt_deg=0.0):
     print("  Caching target line-of-sight over coarse grid …")
     cache = {}
     for name, target in targets.items():
         t0 = time.time()
-        unit, rng = los_unit_vectors(target, earth, observer, times)
-        cache[name] = {"unit": unit, "range": rng}
+        observer_ssb = earth + observer
+        apparent = observer_ssb.at(times).observe(target).apparent()
+        vec = np.array(apparent.position.km, dtype=float, copy=True)
+        norm = np.linalg.norm(vec, axis=0)
+        safe_norm = np.where(norm == 0.0, 1.0, norm)
+        unit = vec / safe_norm
+        rng = np.full(norm.shape, np.inf) if isinstance(target, Star) else norm
+        altitude, _, _ = apparent.altaz()
+        cache[name] = {
+            "unit": unit,
+            "range": rng,
+            "above_horizon": altitude.degrees >= min_alt_deg,
+        }
         print(f"    {name:12s} LOS cached in {time.time()-t0:.2f}s")
     return cache
 
@@ -458,18 +493,22 @@ def cache_satellite_positions(sats, observer, times):
     cache = {}
     for name, sat in sats.items():
         t0 = time.time()
-        pos = np.array(
-            (sat - observer).at(times).position.km, dtype=float, copy=True
-        )
+        sat_state = (sat - observer).at(times)
+        pos = np.array(sat_state.position.km, dtype=float, copy=True)
         alt = np.linalg.norm(pos, axis=0)
-        cache[name] = {"pos": pos, "alt": alt}
+        altitude, _, _ = sat_state.altaz()
+        cache[name] = {
+            "pos": pos,
+            "alt": alt,
+            "above_horizon": altitude.degrees >= 0.0,
+        }
         print(f"    {name:12s} positions cached in {time.time()-t0:.2f}s")
     return cache
 
 
 def coarse_pair_scan(sat_entry, target_entry, times, max_dist_km,
                      earth=None, observer=None, sat=None, target=None,
-                     min_alt_deg=0.0,
+                     min_alt_deg=0.0, above_horizon=None,
                      label="", verbose=True):
     sat_pos = sat_entry["pos"]
     sat_alt = sat_entry["alt"]
@@ -487,7 +526,9 @@ def coarse_pair_scan(sat_entry, target_entry, times, max_dist_km,
     finite_rng = np.isfinite(tgt_range)
     mask &= (~finite_rng) | (proj < tgt_range)
 
-    if earth is not None and observer is not None \
+    if above_horizon is not None:
+        mask &= above_horizon
+    elif earth is not None and observer is not None \
             and sat is not None and target is not None:
         mask &= horizon_mask(sat, target, earth, observer,
                              times, min_alt_deg)
@@ -926,7 +967,7 @@ def _fmt_km(km):
 
 
 def _add_legend(m, confirmed_count, near_count, tile_layer_name,
-                has_corridor=False, physical_km=None):
+                has_corridor=False, physical_km=None, event_tags=None):
     corridor_row = ""
     if has_corridor:
         phys = _fmt_km(physical_km)
@@ -960,6 +1001,7 @@ def _add_legend(m, confirmed_count, near_count, tile_layer_name,
       <div style="font-weight: bold; margin-bottom: 6px;">
         Transit status
       </div>
+      {event_tags or ""}
       <div style="display: flex; align-items: center; margin-bottom: 3px;">
         <span style="display:inline-block; width:12px; height:12px;
                      border-radius:50%; background:{STATUS_COLORS['CONFIRMED']};
@@ -1016,6 +1058,16 @@ def generate_transit_map(event, lat, lon, max_dist_km,
     layer = TILE_LAYERS.get(tile_layer, TILE_LAYERS[DEFAULT_TILE_LAYER])
     status = event.get("status", "NEAR")
     color = STATUS_COLORS.get(status, "gray")
+    condition_tags = event_condition_tags(event)
+    condition_badges = "".join(
+        f'<span style="display:inline-block; margin:0 5px 5px 0; '
+        f'padding:3px 7px; border-radius:4px; background:#fff3cd; '
+        f'color:#664d03; font-weight:bold;">{tag}</span>'
+        for tag in condition_tags
+    )
+    condition_popup = "".join(
+        f"<br><b>{tag}</b>" for tag in condition_tags
+    )
 
     stamp = event["time"].utc_strftime("%Y%m%dT%H%M%SZ")
     site = (f"lat{lat:+.6f}_lon{lon:+.6f}"
@@ -1155,7 +1207,8 @@ def generate_transit_map(event, lat, lon, max_dist_km,
                f"UTC: {event['time_utc']}<br>"
                f"Sep from your site: {event['sep_km']:.3f} km "
                f"({event.get('sep_deg', 0.0):.4f}°)<br>"
-               f"Slant range: {event['sat_alt_km']:.0f} km"),
+               f"Slant range: {event['sat_alt_km']:.0f} km"
+               f"{condition_popup}"),
         tooltip=f"{status}: {event['sat']} → {event['target']}",
     ).add_to(m)
 
@@ -1166,6 +1219,7 @@ def generate_transit_map(event, lat, lon, max_dist_km,
         tile_layer_name=tile_layer,
         has_corridor=has_corridor,
         physical_km=corridor_km,
+        event_tags=condition_badges,
     )
 
     m.save(out_html)
@@ -1177,8 +1231,13 @@ def generate_transit_map(event, lat, lon, max_dist_km,
 # ═══════════════════════════════════════════════════════════════════
 
 def classify_event(event, sat_slant_km, target_name, earth, sat, target,
-                   observer, ts, min_alt_deg=0.0, sat_name=None):
+                   observer, ts, ephemeris, min_alt_deg=0.0, sat_name=None):
     t = ts.from_datetimes([event["time"].utc_datetime()])
+
+    sun_alt, _, _ = ((earth + observer).at(t)
+                     .observe(ephemeris["sun"]).apparent().altaz())
+    daylight = float(np.atleast_1d(sun_alt.degrees)[0]) >= 0.0
+    satellite_sunlit = bool(np.atleast_1d(sat.at(t).is_sunlit(ephemeris))[0])
 
     tgt_alt, _, _ = ((earth + observer).at(t)
                      .observe(target).apparent().altaz())
@@ -1199,6 +1258,8 @@ def classify_event(event, sat_slant_km, target_name, earth, sat, target,
             "sep_deg": float("nan"),
             "inside_corridor": False,
             "status": "REJECT",
+            "daylight": daylight,
+            "satellite_sunlit": satellite_sunlit,
             "reason": (f"below horizon "
                        f"(target_alt={tgt_alt_deg:.1f}°, "
                        f"sat_alt={sat_alt_deg:.1f}°)"),
@@ -1225,6 +1286,8 @@ def classify_event(event, sat_slant_km, target_name, earth, sat, target,
         "sep_deg": sep_deg,
         "inside_corridor": inside,
         "status": status,
+        "daylight": daylight,
+        "satellite_sunlit": satellite_sunlit,
         "reason": "",
     }
 
@@ -1297,8 +1360,10 @@ def main():
     print(f"  Coarse grid: {n_coarse} points at "
           f"{cfg['coarse_step_s']:.0f} s step")
 
-    target_cache = cache_target_los(visible_targets, earth, observer,
-                                    coarse_times)
+    target_cache = cache_target_los(
+        visible_targets, earth, observer, coarse_times,
+        min_alt_deg=cfg["min_alt"],
+    )
     sat_cache = cache_satellite_positions(sats, observer, coarse_times)
 
     print("\n[5/5] Scanning for transits …")
@@ -1320,6 +1385,8 @@ def main():
                 cfg["max_dist_km"],
                 earth=earth, observer=observer, sat=sat, target=target,
                 min_alt_deg=cfg["min_alt"],
+                above_horizon=(sat_entry["above_horizon"]
+                               & tgt_entry["above_horizon"]),
                 label=f"{sat_name}/{target_name}",
                 verbose=True,
             )
@@ -1380,7 +1447,7 @@ def main():
                          "obs_lon": cfg["lon"]}
                 cls = classify_event(
                     probe, c["sat_alt_km"], target_name,
-                    earth, sat, target, observer, ts,
+                    earth, sat, target, observer, ts, eph,
                     min_alt_deg=cfg["min_alt"],
                     sat_name=sat_name,
                 )
@@ -1390,7 +1457,8 @@ def main():
                     print(f"        refine {i+1}/{len(fine)}: "
                           f"{t_ref.utc_strftime('%Y-%m-%d %H:%M:%S')}  "
                           f"[{colored_status(cls['status'])}] "
-                          f"{cls['reason']}",
+                          f"{cls['reason']}"
+                          f"{format_event_condition_tags(cls)}",
                           flush=True)
                     continue
 
@@ -1398,7 +1466,8 @@ def main():
                       f"{t_ref.utc_strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}  "
                       f"sep={sep_deg:.4f}°  "
                       f"sep_perp={sep_km:.3f} km  "
-                      f"[{colored_status(cls['status'])}]", flush=True)
+                      f"[{colored_status(cls['status'])}]"
+                      f"{format_event_condition_tags(cls)}", flush=True)
 
                 target_events.append({
                     "sat": sat_name,
@@ -1413,6 +1482,8 @@ def main():
                     "sub_lon": cls["sub_lon"],
                     "corridor_km": cls["corridor_km"],
                     "inside_corridor": cls["inside_corridor"],
+                    "daylight": cls["daylight"],
+                    "satellite_sunlit": cls["satellite_sunlit"],
                     "obs_lat": cfg["lat"],
                     "obs_lon": cfg["lon"],
                 })
@@ -1422,7 +1493,8 @@ def main():
                          if e["status"] == "CONFIRMED")
             n_near = sum(1 for e in target_events
                          if e["status"] == "NEAR")
-            print(f"      {len(target_events)} events after dedup "
+            event_word = "event" if len(target_events) == 1 else "events"
+            print(f"      {len(target_events)} {event_word} after dedup "
                   f"({n_conf} CONFIRMED, {n_near} NEAR, "
                   f"{n_rejected} rejected), "
                   f"elapsed {time.time()-t_target:.1f}s", flush=True)
@@ -1432,7 +1504,8 @@ def main():
     print("\n" + "═" * 72)
     confirmed = [e for e in all_events if e["status"] == "CONFIRMED"]
     near      = [e for e in all_events if e["status"] == "NEAR"]
-    print(f"Total events in search radius: {len(all_events)} "
+    event_word = "event" if len(all_events) == 1 else "events"
+    print(f"Total {event_word} in search radius: {len(all_events)} "
           f"({len(confirmed)} CONFIRMED, {len(near)} NEAR)")
 
     for e in sorted(all_events, key=lambda x: x["time"].utc_datetime()):
@@ -1441,7 +1514,8 @@ def main():
               f"{e['time_utc']} UTC   "
               f"sep={e.get('sep_deg', 0.0):7.4f}°   "
               f"sep_km={e['sep_km']:7.4f} km   "
-              f"slant={e['sat_alt_km']:.0f} km")
+              f"slant={e['sat_alt_km']:.0f} km"
+              f"{format_event_condition_tags(e)}")
 
     target_objs = {name: build_target(name, eph)
                    for name in visible_targets}

@@ -106,6 +106,125 @@ def test_batched_coordinate_first_vectors_can_be_transposed():
     )
 
 
+def test_coarse_scan_uses_cached_horizon_mask(monkeypatch):
+    monkeypatch.setattr(
+        transit,
+        "angular_separation",
+        lambda a, b: np.zeros(a.shape[1]),
+    )
+
+    def unexpected_horizon_calculation(*args, **kwargs):
+        raise AssertionError("coarse scan should use cached horizon masks")
+
+    monkeypatch.setattr(transit, "horizon_mask", unexpected_horizon_calculation)
+
+    sat_entry = {
+        "pos": np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+        "alt": np.ones(3),
+    }
+    target_entry = {
+        "unit": np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+        "range": np.full(3, np.inf),
+    }
+
+    candidates, count = transit.coarse_pair_scan(
+        sat_entry, target_entry, [None, None, None], 1.0,
+        above_horizon=np.array([True, False, True]),
+        verbose=False,
+    )
+
+    assert count == 2
+    assert len(candidates) == 2
+
+
+def test_event_condition_tags_only_include_applicable_conditions():
+    assert transit.event_condition_tags({
+        "daylight": True,
+        "satellite_sunlit": False,
+    }) == ["DAYLIGHT", "SATELLITE UNLIT"]
+    assert transit.event_condition_tags({
+        "daylight": False,
+        "satellite_sunlit": True,
+    }) == []
+
+
+def test_status_output_omits_ansi_colors_when_redirected(monkeypatch):
+    class RedirectedOutput:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(transit.sys, "stdout", RedirectedOutput())
+    assert transit.colored_status("NEAR") == "NEAR"
+
+
+def test_classify_event_records_daylight_and_satellite_shadow(monkeypatch):
+    class Angle:
+        degrees = np.array([10.0])
+
+    class Observed:
+        def apparent(self):
+            return self
+
+        def altaz(self):
+            return Angle(), None, None
+
+    class ObserverAt:
+        def observe(self, target):
+            return Observed()
+
+    class ObserverSSB:
+        def at(self, times):
+            return ObserverAt()
+
+    class Earth:
+        def __add__(self, observer):
+            return ObserverSSB()
+
+    class SatellitePosition:
+        def is_sunlit(self, ephemeris):
+            return np.array([False])
+
+    class SatelliteRelative:
+        def at(self, times):
+            return self
+
+        def altaz(self):
+            return Angle(), None, None
+
+    class Satellite:
+        def at(self, times):
+            return SatellitePosition()
+
+        def __sub__(self, observer):
+            return SatelliteRelative()
+
+    class Coordinate:
+        degrees = np.array([1.0])
+
+    class Subpoint:
+        latitude = Coordinate()
+        longitude = Coordinate()
+
+    monkeypatch.setattr(
+        transit, "compute_separations",
+        lambda *args: (
+            np.array([1.0]), None, None, None, np.array([0.1])
+        ),
+    )
+    monkeypatch.setattr(transit.wgs84, "subpoint_of", lambda position: Subpoint())
+
+    ts = transit.load.timescale()
+    result = transit.classify_event(
+        {"time": ts.utc(2026, 10, 9, 2)},
+        1000.0, "Capella", Earth(), Satellite(), object(), object(), ts,
+        {"sun": object()},
+    )
+
+    assert result["daylight"] is True
+    assert result["satellite_sunlit"] is False
+    assert result["status"] == "NEAR"
+
+
 def test_refinement_batches_geometry_evaluations(monkeypatch):
     ts = transit.load.timescale()
     t_rough = ts.utc(2026, 10, 9, 2, 55, 42.375)
@@ -206,6 +325,8 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
         "sat_alt_km": 1000.0,
         "corridor_km": 0.1,
         "status": "NEAR",
+        "daylight": True,
+        "satellite_sunlit": False,
     }
     nearest = (39.25, 9.27)
     grid_calls = []
@@ -242,6 +363,8 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
     html = tmp_path.joinpath(path.split("/")[-1]).read_text()
     assert "Jupiter transit (" in html
     assert f" at {event_time} UTC" in html
+    assert "<b>DAYLIGHT</b>" in html
+    assert "<b>SATELLITE UNLIT</b>" in html
     assert len(grid_calls) == 1
     assert grid_calls[0][1]["n"] == 5
     assert grid_calls[0][1]["sample_radius_km"] == 0.1
