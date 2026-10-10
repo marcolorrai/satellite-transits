@@ -67,7 +67,9 @@ options.
 Search dates and generated event timestamps are interpreted as UTC. If
 `start_date` is empty or omitted, the search starts at the current UTC date and
 time. `end_date` is required and uses `YYYY-MM-DD`; it is an exclusive endpoint
-at midnight UTC at the start of that date.
+at midnight UTC at the start of that date. Search windows are limited to 30
+days. Coarse-grid ephemeris caches are computed in chunks to bound temporary
+memory use.
 
 Supported tile layers: `esri_imagery`, `esri_street`, `esri_topo`, and `osm`.
 Multiple layers can be selected with `tile_layers = esri_imagery, osm`.

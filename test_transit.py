@@ -59,6 +59,29 @@ def test_explicit_start_date_is_preserved(tmp_path):
     assert transit.parse_config(str(config))["start"] == datetime(2029, 12, 31)
 
 
+def test_search_window_cannot_exceed_maximum_duration(tmp_path):
+    config = tmp_path / "config.ini"
+    config.write_text(
+        "[Observer]\n"
+        "latitude = 1\n"
+        "longitude = 2\n"
+        "[Search]\n"
+        "max_distance_km = 25\n"
+        "start_date = 2029-12-01\n"
+        "end_date = 2030-01-01\n"
+        "min_altitude_deg = 10\n"
+        "[Targets]\n"
+        "transit_objects = Polaris\n"
+        "[Satellites]\n"
+        "[Output]\n",
+        encoding="utf-8",
+    )
+
+    with np.testing.assert_raises_regex(
+            SystemExit, "maximum is 30 days"):
+        transit.parse_config(str(config))
+
+
 def test_same_direction_returns_zero():
     a = np.array([1.0, 0.0, 0.0])
     b = np.array([1.0, 0.0, 0.0])
@@ -94,6 +117,19 @@ def test_sun_uranus_and_neptune_are_supported_targets():
     assert transit.TARGET_ANGULAR_RADIUS_RAD["Sun"] > 0.004
     assert transit.TARGET_ANGULAR_RADIUS_RAD["Uranus"] > 0.0
     assert transit.TARGET_ANGULAR_RADIUS_RAD["Neptune"] > 0.0
+
+
+def test_planet_and_moon_corridors_use_physical_disk_width():
+    slant_range_km = 400.0
+
+    assert np.isclose(
+        transit.disk_corridor_km("Moon", slant_range_km, "ISS"),
+        1.91,
+    )
+    assert np.isclose(
+        transit.disk_corridor_km("Venus", slant_range_km, "ISS"),
+        0.05488,
+    )
 
 
 def test_batched_coordinate_first_vectors_can_be_transposed():
@@ -135,6 +171,60 @@ def test_coarse_scan_uses_cached_horizon_mask(monkeypatch):
 
     assert count == 2
     assert len(candidates) == 2
+
+
+def test_satellite_position_cache_processes_bounded_chunks(monkeypatch):
+    monkeypatch.setattr(transit, "CACHE_CHUNK_SIZE", 2)
+    chunk_sizes = []
+
+    class FakeTimes:
+        def __init__(self, values):
+            self.values = tuple(values)
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, index):
+            return FakeTimes(self.values[index])
+
+    class Angle:
+        def __init__(self, values):
+            self.degrees = np.asarray(values, dtype=float)
+
+    class State:
+        def __init__(self, times):
+            self.times = times
+
+        @property
+        def position(self):
+            values = np.asarray(self.times.values, dtype=float)
+            return type("Position", (), {
+                "km": np.vstack((values, values * 0, values * 0))
+            })()
+
+        def altaz(self):
+            return Angle(np.ones(len(self.times))), None, None
+
+    class RelativeSatellite:
+        def at(self, times):
+            chunk_sizes.append(len(times))
+            return State(times)
+
+    class Satellite:
+        def __sub__(self, observer):
+            return RelativeSatellite()
+
+    cache = transit.cache_satellite_positions(
+        {"ISS": Satellite()}, object(), FakeTimes(range(5))
+    )
+
+    np.testing.assert_array_equal(
+        cache["ISS"]["pos"][0], np.arange(5, dtype=float)
+    )
+    np.testing.assert_array_equal(
+        cache["ISS"]["above_horizon"], np.ones(5, dtype=bool)
+    )
+    assert chunk_sizes == [2, 2, 1]
 
 
 def test_event_condition_tags_only_include_applicable_conditions():

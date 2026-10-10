@@ -174,8 +174,6 @@ SAT_PHYSICAL_RADIUS_KM = {
 }
 DEFAULT_SAT_PHYSICAL_RADIUS_KM = 0.050
 
-DISK_SAFETY_FACTOR = 5.0
-
 DEFAULT_TLE_URL = (
     "https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle"
 )
@@ -356,7 +354,7 @@ def disk_corridor_km(target_name, slant_range_km, sat_name=None):
         return 0.0
     target_ang_rad = TARGET_ANGULAR_RADIUS_RAD.get(target_name, 0.0)
     sat_ang_rad = sat_rad_km / slant_range_km
-    return (target_ang_rad + sat_ang_rad) * slant_range_km * DISK_SAFETY_FACTOR
+    return (target_ang_rad + sat_ang_rad) * slant_range_km
 
 
 # ═══════════════════════════════════════════════════════════════════
