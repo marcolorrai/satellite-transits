@@ -82,6 +82,29 @@ def test_search_window_cannot_exceed_maximum_duration(tmp_path):
         transit.parse_config(str(config))
 
 
+def test_search_window_allows_maximum_duration(tmp_path):
+    config = tmp_path / "config.ini"
+    config.write_text(
+        "[Observer]\n"
+        "latitude = 1\n"
+        "longitude = 2\n"
+        "[Search]\n"
+        "max_distance_km = 25\n"
+        "start_date = 2029-12-02\n"
+        "end_date = 2030-01-01\n"
+        "min_altitude_deg = 10\n"
+        "[Targets]\n"
+        "transit_objects = Polaris\n"
+        "[Satellites]\n"
+        "[Output]\n",
+        encoding="utf-8",
+    )
+
+    parsed = transit.parse_config(str(config))
+
+    assert (parsed["end"] - parsed["start"]).days == 30
+
+
 def test_same_direction_returns_zero():
     a = np.array([1.0, 0.0, 0.0])
     b = np.array([1.0, 0.0, 0.0])
@@ -367,10 +390,20 @@ def test_corridor_band_preserves_physical_width_at_mid_latitude():
     corridor_km = 0.05
 
     center, borders, nearest_point = transit._make_corridor_band(
-        grid, corridor_km, lat0, lon0, Z_obs_km=10.0
+        grid, corridor_km, lat0, lon0, Z_obs_km=10.0,
+        line_extent_km=25.0,
     )
 
     assert center[1] == nearest_point
+    for endpoint in (center[0], center[-1]):
+        north_km = (endpoint[0] - nearest_point[0]) * 111.32
+        east_km = (
+            (endpoint[1] - nearest_point[1])
+            * 111.32
+            * np.cos(np.radians(nearest_point[0]))
+        )
+        assert np.hypot(north_km, east_km) > 25.0
+
     for point_a, point_b in zip(*borders):
         midpoint_lat = (point_a[0] + point_b[0]) / 2.0
         north_km = (point_a[0] - point_b[0]) * 111.32
@@ -420,6 +453,7 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
     }
     nearest = (39.25, 9.27)
     grid_calls = []
+    band_calls = []
 
     def fake_corridor_grid(*args, **kwargs):
         grid_calls.append((args, kwargs))
@@ -429,6 +463,14 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
             "sub_lon": 9.3,
         }
 
+    def fake_corridor_band(*args, **kwargs):
+        band_calls.append((args, kwargs))
+        return (
+            [(39.3, 9.3), nearest, (39.2, 9.2)],
+            [[(39.3, 9.3), (39.2, 9.2)], [(39.3, 9.3), (39.2, 9.2)]],
+            nearest,
+        )
+
     monkeypatch.setattr(
         transit,
         "compute_corridor_grid",
@@ -437,11 +479,7 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
     monkeypatch.setattr(
         transit,
         "_make_corridor_band",
-        lambda *args, **kwargs: (
-            [(39.3, 9.3), nearest, (39.2, 9.2)],
-            [[(39.3, 9.3), (39.2, 9.2)], [(39.3, 9.3), (39.2, 9.2)]],
-            nearest,
-        ),
+        fake_corridor_band,
     )
 
     path = transit.generate_transit_map(
@@ -458,6 +496,7 @@ def test_nearest_corridor_point_tooltip_includes_event_time(tmp_path, monkeypatc
     assert len(grid_calls) == 1
     assert grid_calls[0][1]["n"] == 5
     assert grid_calls[0][1]["sample_radius_km"] == 0.1
+    assert band_calls[0][1]["line_extent_km"] == 25
 
 
 def test_transit_maps_from_different_sites_do_not_overwrite(tmp_path):

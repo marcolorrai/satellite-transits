@@ -17,7 +17,7 @@ before refinement so the same physical event is refined once.
 Corridor width uses REAL physics:
     For stars        : half-width = satellite_physical_radius
     For Moon/planets : half-width = (target_ang_rad + sat_ang_rad)
-                                   * slant_range * SAFETY
+                                   * slant_range
 
 Map geometry:
     The map is ALWAYS centered on the observer.  The corridor is
@@ -250,6 +250,16 @@ def parse_config(path="config.ini"):
         if start_date
         else datetime.now(timezone.utc).replace(tzinfo=None)
     )
+    end = datetime.fromisoformat(cfg.get("Search", "end_date"))
+    start_utc = (start.astimezone(timezone.utc).replace(tzinfo=None)
+                 if start.tzinfo is not None else start)
+    end_utc = (end.astimezone(timezone.utc).replace(tzinfo=None)
+               if end.tzinfo is not None else end)
+    duration = end_utc - start_utc
+    if duration <= timedelta(0):
+        raise SystemExit("Search end_date must be after start_date.")
+    if duration > timedelta(days=30):
+        raise SystemExit("Search window maximum is 30 days.")
 
     return {
         "lat":           cfg.getfloat("Observer", "latitude"),
@@ -258,8 +268,7 @@ def parse_config(path="config.ini"):
                                       fallback=0.0),
         "max_dist_km":   cfg.getfloat("Search", "max_distance_km"),
         "start":         start,
-        "end":           datetime.fromisoformat(
-                             cfg.get("Search", "end_date")),
+        "end":           end,
         "coarse_step_s": cfg.getfloat("Search", "coarse_step_seconds",
                                       fallback=5.0),
         "fine_step_s":   cfg.getfloat("Search", "fine_step_seconds",
@@ -794,7 +803,7 @@ def compute_corridor_grid(sat, target, earth, t_event,
 
 
 def _make_corridor_band(grid, corridor_km, obs_lat, obs_lon,
-                        Z_obs_km=None):
+                        Z_obs_km=None, line_extent_km=None):
     """
     Build the corridor band anchored at the OBSERVER's nearest point
     on the corridor axis.
@@ -879,13 +888,14 @@ def _make_corridor_band(grid, corridor_km, obs_lat, obs_lon,
     lat1_deg = float(LAT[-1, 0])
     lon0_deg = float(LON[0, 0])
     lon1_deg = float(LON[0, -1])
-    extent_radius_km = grid.get("extent_radius_km")
-    if extent_radius_km is None:
+    if line_extent_km is None:
+        line_extent_km = grid.get("extent_radius_km")
+    if line_extent_km is None:
         half_lat = abs(lat1_deg - lat0_deg) / 2.0
         half_lon = abs(lon1_deg - lon0_deg) / 2.0
     else:
-        half_lat = extent_radius_km / 111.32
-        half_lon = extent_radius_km / (
+        half_lat = line_extent_km / 111.32
+        half_lon = line_extent_km / (
             111.32 * max(np.cos(np.radians(obs_lat)), 1e-6)
         )
     u_mag = float(np.hypot(u_lat, u_lon))
@@ -1131,7 +1141,8 @@ def generate_transit_map(event, lat, lon, max_dist_km,
             # with the printed event log.
             center_line, border_lines, nearest_point = \
                 _make_corridor_band(grid, corridor_km, lat, lon,
-                                    Z_obs_km=obs_sep_km)
+                                    Z_obs_km=obs_sep_km,
+                                    line_extent_km=max_dist_km)
 
             for line in border_lines:
                 folium.PolyLine(
