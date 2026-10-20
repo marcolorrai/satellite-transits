@@ -46,6 +46,21 @@ Run the predictor from the project directory:
 python transit.py
 ```
 
+To use the desktop configuration and event-list interface:
+
+```bash
+python transit_gui.py
+```
+
+The GUI loads `config.ini` (or `config.example.ini` if no local config exists).
+Edit the search settings, run the search, then click an event to open its
+generated map in your browser. The event list includes daylight and satellite
+shadow conditions; confirmed crossings and events within 1 km are highlighted.
+The GUI accepts target lists whose continuation lines are not indented and
+normalizes them when saving. Use **Save settings** to persist the values to the
+selected INI file. The command-line predictor also accepts an explicit
+configuration path with `python transit.py --config path/to/config.ini`.
+
 The program fetches current station TLEs from Celestrak by default. It stores
 generated HTML maps in the configured output directory (`transit_maps/` by
 default). Map tiles are provided by the selected tile service when the map is

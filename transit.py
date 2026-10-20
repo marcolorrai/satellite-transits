@@ -54,6 +54,7 @@ Config file (config.ini):
 """
 
 import configparser
+import argparse
 import os
 import sys
 import time
@@ -1323,13 +1324,13 @@ def classify_event(event, sat_slant_km, target_name, earth, sat, target,
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
-def main():
+def main(config_path="config.ini"):
     wall0 = time.time()
     print("═" * 72)
     print(" Space Station Transit Predictor — Verbose Edition")
     print("═" * 72)
 
-    cfg = parse_config()
+    cfg = parse_config(config_path)
     print(f"\nObserver   : {cfg['lat']:.6f}, {cfg['lon']:.6f}  "
           f"({cfg['elev']:.0f} m)")
     print(f"Window     : {cfg['start']} → {cfg['end']}")
@@ -1573,4 +1574,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        default="config.ini",
+        help="path to the INI configuration file (default: config.ini)",
+    )
+    main(parser.parse_args().config)
