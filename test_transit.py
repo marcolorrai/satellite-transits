@@ -196,6 +196,30 @@ def test_coarse_scan_uses_cached_horizon_mask(monkeypatch):
     assert len(candidates) == 2
 
 
+def test_coarse_scan_exactly_checks_only_dot_product_screen_survivors():
+    sat_dir = np.array([
+        [1.0, np.cos(np.radians(10.0))],
+        [0.0, np.sin(np.radians(10.0))],
+        [0.0, 0.0],
+    ])
+    sat_entry = {
+        "pos": sat_dir,
+        "alt": np.ones(2),
+    }
+    target_entry = {
+        "unit": np.array([[1.0, 1.0], [0.0, 0.0], [0.0, 0.0]]),
+        "range": np.full(2, np.inf),
+    }
+
+    candidates, count = transit.coarse_pair_scan(
+        sat_entry, target_entry, [None, None], 0.1, verbose=False,
+    )
+
+    assert count == 1
+    assert len(candidates) == 1
+    assert candidates[0]["separation_deg"] == 0.0
+
+
 def test_satellite_position_cache_processes_bounded_chunks(monkeypatch):
     monkeypatch.setattr(transit, "CACHE_CHUNK_SIZE", 2)
     chunk_sizes = []
@@ -259,6 +283,11 @@ def test_event_condition_tags_only_include_applicable_conditions():
         "daylight": False,
         "satellite_sunlit": True,
     }) == []
+    assert transit.event_condition_tags({
+        "target": "Sun",
+        "daylight": True,
+        "satellite_sunlit": False,
+    }) == ["SATELLITE UNLIT"]
 
 
 def test_status_output_omits_ansi_colors_when_redirected(monkeypatch):

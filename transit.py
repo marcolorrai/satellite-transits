@@ -88,7 +88,7 @@ def colored_status(status):
 
 def event_condition_tags(event):
     tags = []
-    if event.get("daylight"):
+    if event.get("target") != "Sun" and event.get("daylight"):
         tags.append("DAYLIGHT")
     if event.get("satellite_sunlit") is False:
         tags.append("SATELLITE UNLIT")
@@ -523,13 +523,13 @@ def coarse_pair_scan(sat_entry, target_entry, times, max_dist_km,
     tgt_range = target_entry["range"]
 
     proj = np.sum(sat_pos * tgt_unit, axis=0)
-    perp = sat_pos - tgt_unit * proj
-    sep_km = np.linalg.norm(perp, axis=0)
-    sat_dir = sat_pos / np.where(sat_alt == 0.0, 1.0, sat_alt)
-    sep_deg = angular_separation(sat_dir, tgt_unit)
-
     coarse_net_deg = np.degrees(np.minimum(max_dist_km / sat_alt, 1.0))
-    mask = (sep_deg < coarse_net_deg) & (proj > 0)
+    cos_sep = proj / np.where(sat_alt == 0.0, 1.0, sat_alt)
+    # Use a small tolerance so the screen cannot discard a hit due to
+    # floating-point rounding; verify survivors with the exact angle test.
+    mask = (
+        cos_sep > np.cos(np.radians(coarse_net_deg)) - 1e-12
+    ) & (proj > 0)
     finite_rng = np.isfinite(tgt_range)
     mask &= (~finite_rng) | (proj < tgt_range)
 
@@ -540,23 +540,41 @@ def coarse_pair_scan(sat_entry, target_entry, times, max_dist_km,
         mask &= horizon_mask(sat, target, earth, observer,
                              times, min_alt_deg)
 
-    idx = np.where(mask)[0]
+    candidate_idx = np.where(mask)[0]
+    if candidate_idx.size == 0:
+        return [], 0
+
+    candidate_sep_deg = angular_separation(
+        sat_pos[:, candidate_idx]
+        / np.where(sat_alt[candidate_idx] == 0.0, 1.0,
+                   sat_alt[candidate_idx]),
+        tgt_unit[:, candidate_idx],
+    )
+    within_net = candidate_sep_deg < coarse_net_deg[candidate_idx]
+    idx = candidate_idx[within_net]
+    sep_deg = candidate_sep_deg[within_net]
+    candidate_sat_pos = sat_pos[:, idx]
+    candidate_proj = proj[idx]
+    sep_km = np.linalg.norm(
+        candidate_sat_pos - tgt_unit[:, idx] * candidate_proj,
+        axis=0,
+    )
 
     if verbose and len(idx) > 0:
         print(f"      [{label}] coarse hits (within {max_dist_km:.1f} km):",
               flush=True)
-        for i in idx:
+        for i, angle, distance in zip(idx, sep_deg, sep_km):
             print(f"        {times[i].utc_strftime('%Y-%m-%d %H:%M:%S')}  "
-                  f"sep={sep_km[i]:8.3f} km  sep_angle={sep_deg[i]:8.4f}°  "
+                  f"sep={distance:8.3f} km  sep_angle={angle:8.4f}°  "
                   f"slant={sat_alt[i]:.0f} km",
                   flush=True)
 
     candidates = []
-    for i in idx:
+    for i, angle, distance in zip(idx, sep_deg, sep_km):
         candidates.append({
             "time": times[i],
-            "separation_km": float(sep_km[i]),
-            "separation_deg": float(sep_deg[i]),
+            "separation_km": float(distance),
+            "separation_deg": float(angle),
             "sat_alt_km": float(sat_alt[i]),
         })
     return candidates, len(idx)
