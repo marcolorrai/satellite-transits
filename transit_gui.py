@@ -37,6 +37,22 @@ EVENT_LINE = re.compile(
     r"sep=\s*([\d.]+)°\s+sep_km=\s*([\d.]+) km\s+"
     r"slant=\s*([\d.]+) km(.*)$"
 )
+TARGET_ICONS = {
+    "Sun": "☀",
+    "Moon": "☾",
+    "Mercury": "☿",
+    "Venus": "♀",
+    "Mars": "♂",
+    "Jupiter": "♃",
+    "Saturn": "♄",
+    "Uranus": "♅",
+    "Neptune": "♆",
+}
+
+
+def format_target_label(name):
+    icon = TARGET_ICONS.get(name, "✦")
+    return f"{icon} {name}"
 
 
 def normalize_config_text(text):
@@ -403,6 +419,7 @@ class TransitGui:
             self.process = subprocess.Popen(
                 [
                     sys.executable,
+                    "-u",
                     str(TRANSIT_SCRIPT),
                     "--config",
                     str(self.temp_config),
@@ -468,7 +485,7 @@ class TransitGui:
             row = (
                 event["time"],
                 event["satellite"],
-                event["target"],
+                format_target_label(event["target"]),
                 event["status"],
                 f"{event['sep_km']:.3f}",
                 f"{event['slant_km']:.0f}",
